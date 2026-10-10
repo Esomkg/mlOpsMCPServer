@@ -1,0 +1,56 @@
+# One command runs the whole system:   docker compose up --build
+#   train  -> trains a first model into the shared volume, then exits
+#   api    -> serves the model on http://localhost:8000/docs   (starts after train succeeds)
+#   mlflow -> experiment UI on http://localhost:5000
+# Optional MCP server in a container:  docker compose run --rm -i mcp
+# Ports can be changed without editing this file:  API_PORT=8001 MLFLOW_PORT=5001 docker compose up
+
+x-app: &app
+  build: .
+  image: mlops-copilot
+  volumes:
+    - state:/state
+
+services:
+  train:
+    <<: *app
+    command: ["python", "/app/training/train.py", "--n-estimators", "100", "--max-depth", "5"]
+    restart: "no"
+
+  api:
+    <<: *app
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      train:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  mlflow:
+    <<: *app
+    command: ["mlflow", "ui", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "sqlite:////state/mlflow.db"]
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    depends_on:
+      train:
+        condition: service_completed_successfully
+
+  # MCP server over stdio. Not started by default (profile "tools"). Start the stack first
+  # (docker compose up -d), then an MCP client launches this with:
+  #   docker compose run --rm --no-deps -i -T mcp
+  # --no-deps matters: without it, compose would re-run `train` (a new MLflow run) on every launch.
+  mcp:
+    <<: *app
+    profiles: ["tools"]
+    command: ["python", "/app/mcp_server/server.py"]
+    environment:
+      MODEL_API_URL: http://api:8000
+    stdin_open: true
+
+volumes:
+  state:

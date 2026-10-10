@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated at runtime: MLflow state, monitoring data, logs
+mlruns/
+mlflow.db
+data/
+logs/
+*.log
+
+# Local-only: contains absolute paths from this machine
+.mcp.json
+api.out.log
+mlflow-ui.out.log
