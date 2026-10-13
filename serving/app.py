@@ -12,6 +12,7 @@ import mlflow
 import mlflow.sklearn
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from mlflow.exceptions import MlflowException
 from pydantic import BaseModel, Field
 from sklearn.datasets import load_wine
 
@@ -25,8 +26,9 @@ _wine = load_wine()
 FEATURE_NAMES = list(_wine.feature_names)  # the 13 inputs, in the order the model expects
 CLASS_NAMES = list(_wine.target_names)  # "class_0", "class_1", "class_2"
 
-# Holds the loaded model so we load it once at startup, not on every request.
-state: dict = {}
+# The model currently being served. It is one dict that is replaced as a whole (never edited key by
+# key), so a request that runs during a reload sees either the old model or the new one, never a mix.
+state: dict = {}  # state["current"] = {"run_id": ..., "source": ..., "model": ...}
 
 
 def find_best_run_id() -> str:
@@ -42,21 +44,36 @@ def find_best_run_id() -> str:
     return runs.iloc[0]["run_id"]
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Runs once when the server starts. Prefer the model promoted to "production" in the registry;
-    # if nothing has been promoted yet, fall back to the run with the best F1.
-    # (The trusted types were saved with the model in train.py, so load_model picks them up.)
+def select_and_load() -> dict:
+    """Pick the model to serve and load it. Used at startup and by /reload.
+
+    Prefer the model promoted to "production" in the registry; if nothing has been promoted yet,
+    fall back to the run with the best F1. Raises if the chosen model cannot be loaded, so a failed
+    reload never replaces a working model. (The trusted types were saved with the model in
+    train.py, so load_model picks them up.)
+    """
     try:
         prod = mlflow.MlflowClient().get_model_version_by_alias(MODEL_NAME, "production")
-        state["run_id"] = prod.run_id
-        state["source"] = f"registry production (version {prod.version})"
-        state["model"] = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@production")
-    except Exception:
-        run_id = find_best_run_id()
-        state["run_id"] = run_id
-        state["source"] = "best F1 (no production model promoted yet)"
-        state["model"] = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
+    except MlflowException:
+        prod = None  # no production alias (or nothing registered yet)
+
+    if prod is not None:
+        return {
+            "run_id": prod.run_id,
+            "source": f"registry production (version {prod.version})",
+            "model": mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@production"),
+        }
+    run_id = find_best_run_id()
+    return {
+        "run_id": run_id,
+        "source": "best F1 (no production model promoted yet)",
+        "model": mlflow.sklearn.load_model(f"runs:/{run_id}/model"),
+    }
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state["current"] = select_and_load()  # runs once when the server starts
     yield
 
 
@@ -80,15 +97,41 @@ class PredictResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "run_id": state["run_id"], "source": state["source"]}
+    cur = state["current"]
+    return {"status": "ok", "run_id": cur["run_id"], "source": cur["source"]}
+
+
+@app.post("/reload")
+def reload_model():
+    """Re-run the model selection and switch to the result without restarting the server.
+
+    The new model is fully loaded before it replaces the old one. If loading fails, the old model
+    keeps serving and this returns an error. Note: no authentication, so do not expose publicly.
+    """
+    previous = state["current"]
+    try:
+        new = select_and_load()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Reload failed, still serving run {previous['run_id']}: {e}",
+        )
+    state["current"] = new  # single assignment = atomic swap
+    return {
+        "reloaded": True,
+        "changed": new["run_id"] != previous["run_id"],
+        "previous": {"run_id": previous["run_id"], "source": previous["source"]},
+        "now_serving": {"run_id": new["run_id"], "source": new["source"]},
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
+    cur = state["current"]  # read once, so model and run_id always belong together
     # Wrap in a DataFrame with column names, the same shape the model was trained on.
     row = pd.DataFrame([req.features], columns=FEATURE_NAMES)
     try:
-        pred = int(state["model"].predict(row)[0])
+        pred = int(cur["model"].predict(row)[0])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
-    return PredictResponse(prediction=pred, class_name=CLASS_NAMES[pred], run_id=state["run_id"])
+    return PredictResponse(prediction=pred, class_name=CLASS_NAMES[pred], run_id=cur["run_id"])

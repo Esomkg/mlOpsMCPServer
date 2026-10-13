@@ -98,6 +98,49 @@ def test_worse_model_cannot_replace_production(registry):
     assert audit_entries()[-1]["outcome"] == "blocked"
 
 
+class ReloadResponse:
+    def __init__(self, status=200):
+        self.status_code, self.text = status, "boom"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise actions.httpx.HTTPStatusError("err", request=None, response=self)
+
+    def json(self):
+        return {"reloaded": True, "changed": True, "now_serving": {"run_id": "x"}}
+
+
+def test_production_promotion_reloads_the_api(registry, monkeypatch):
+    calls = []
+    monkeypatch.setattr(actions.httpx, "post", lambda url, **k: calls.append(url) or ReloadResponse())
+    run_id = registry(0.9)
+    actions.promote_model(run_id, "staging", confirm=True)
+    assert calls == []  # staging does not touch the live API
+    result = actions.promote_model(run_id, "production", confirm=True)
+    assert calls == [f"{actions.API_URL}/reload"]
+    assert result["api_reload"]["reloaded"] is True
+    assert audit_entries()[-1]["api_reload"]["reloaded"] is True
+
+
+def test_promotion_survives_api_being_down(registry):
+    run_id = registry(0.9)
+    actions.promote_model(run_id, "staging", confirm=True)
+    result = actions.promote_model(run_id, "production", confirm=True)  # API_URL is unreachable here
+    assert result["promoted"] is True
+    assert result["api_reload"]["reloaded"] is False
+    assert "not reachable" in result["api_reload"]["reason"]
+    assert actions.get_registry()["aliases"]["production"] == 1  # the promotion itself still happened
+
+
+def test_failed_reload_is_reported_not_hidden(registry, monkeypatch):
+    monkeypatch.setattr(actions.httpx, "post", lambda *a, **k: ReloadResponse(status=500))
+    run_id = registry(0.9)
+    actions.promote_model(run_id, "staging", confirm=True)
+    result = actions.promote_model(run_id, "production", confirm=True)
+    assert result["promoted"] is True
+    assert result["api_reload"]["reloaded"] is False and "previous model" in result["api_reload"]["reason"]
+
+
 def test_equal_or_better_model_can_replace_production(registry):
     old, new = registry(0.90), registry(0.95)
     for stage in ("staging", "production"):

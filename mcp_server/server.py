@@ -159,6 +159,9 @@ def promote_model(run_id: str, stage: str, confirm: bool = False) -> dict:
     anything. Rules: production requires the model to be in staging first and must not have a worse
     F1 than the current production model. Never use confirm=true unless the user has explicitly
     approved this exact promotion after seeing the dry-run result.
+
+    Promoting to 'production' also tells the running model API to switch to the new model right away
+    (no restart needed). The result's `api_reload` field says whether that worked.
     """
     from mcp_server import actions
 

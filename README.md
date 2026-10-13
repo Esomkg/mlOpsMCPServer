@@ -18,7 +18,7 @@ training/train.py ──▶ logs runs + models to MLflow
 | `check_drift` | read | Evidently drift report: recent data vs training data |
 | `get_registry` | read | Which versions are in staging / production |
 | `trigger_training` | **action** | Train a new model. Dry run unless `confirm=true`. |
-| `promote_model` | **action** | Move a model to staging / production. Dry run unless `confirm=true`; production needs staging first and no F1 regression. Every real action is written to `logs/audit.jsonl`. |
+| `promote_model` | **action** | Move a model to staging / production. Dry run unless `confirm=true`; production needs staging first and no F1 regression. Promoting to production also calls the API's `POST /reload`, so the live model switches with no restart (a failed reload keeps the old model serving). Every real action is written to `logs/audit.jsonl`. |
 
 ## Run it with Docker
 ```

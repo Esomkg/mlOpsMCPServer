@@ -14,12 +14,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+import httpx
+
+ROOT =Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("MLOPS_MLFLOW_DB", ROOT / "mlflow.db"))
 AUDIT_LOG = Path(os.environ.get("MLOPS_AUDIT_LOG", ROOT / "logs" / "audit.jsonl"))
 MODEL_NAME = "wine-classifier"
 STAGES = ("staging", "production")  # implemented as MLflow registry aliases
 
+API_URL = os.environ.get("MODEL_API_URL", "http://127.0.0.1:8000")
+RELOAD_TIMEOUT_S = 120  # loading a model can take a while on a cold machine
 MAX_ESTIMATORS = 500
 MAX_DEPTH = 50
 TRAIN_TIMEOUT_S = 600
@@ -167,6 +171,25 @@ def promote_model(run_id: str, stage: str, confirm: bool = False) -> dict:
 
     version = existing or mlflow.register_model(f"runs:/{run_id}/model", MODEL_NAME)
     client.set_registered_model_alias(MODEL_NAME, stage, str(version.version))
-    audit("promote_model", {**plan, "version": str(version.version), "outcome": "ok"})
-    note = ("Restart the model API for it to start serving this model." if stage == "production" else "")
-    return {"promoted": True, "version": str(version.version), "stage": stage, "run_id": run_id, "note": note}
+    result = {"promoted": True, "version": str(version.version), "stage": stage, "run_id": run_id}
+    if stage == "production":
+        result["api_reload"] = reload_api()  # make the live API switch to the new model now
+    audit("promote_model", {**plan, "version": str(version.version), "outcome": "ok",
+                            "api_reload": result.get("api_reload")})
+    return result
+
+
+def reload_api() -> dict:
+    """Ask the running model API to re-select and load its model (POST /reload)."""
+    try:
+        resp = httpx.post(f"{API_URL}/reload", timeout=RELOAD_TIMEOUT_S)
+        resp.raise_for_status()
+    except httpx.ConnectError:
+        return {"reloaded": False, "reason": f"Model API not reachable at {API_URL}. The promotion is saved; "
+                                              "the API will use it the next time it starts."}
+    except httpx.HTTPStatusError as e:
+        return {"reloaded": False, "reason": f"API reload failed, so it is still serving its previous model: "
+                                              f"{e.response.text[:300]}"}
+    except httpx.HTTPError as e:
+        return {"reloaded": False, "reason": f"API reload call failed: {e}"}
+    return resp.json()

@@ -13,6 +13,13 @@ from sklearn.ensemble import RandomForestClassifier
 from mcp_server import actions
 
 
+@pytest.fixture(autouse=True)
+def never_touch_a_real_api(monkeypatch):
+    """promote_model(production) calls POST /reload on the model API. If a real API happens to be
+    running on this machine, tests must not reload it, so point them at an address nothing listens on."""
+    monkeypatch.setattr(actions, "API_URL", "http://127.0.0.1:1")
+
+
 @pytest.fixture(scope="session")
 def wine_model():
     """A tiny but real model, trained once per test session (5 trees train in milliseconds)."""
