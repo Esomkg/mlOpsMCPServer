@@ -22,8 +22,8 @@ training/train.py ──▶ logs runs + models to MLflow
 
 ## Run it with Docker
 ```
-docker compose up --build        # trains a model, then API on :8000/docs and MLflow UI on :5000
-docker compose run --rm -i mcp   # the MCP server over stdio (for an MCP client)
+docker compose up -d --build                    # trains a model, then API on :8000/docs and MLflow UI on :5000
+docker compose run --rm --no-deps -i -T mcp     # the MCP server over stdio (for an MCP client)
 ```
 
 ## Run it locally
